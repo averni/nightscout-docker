@@ -1,27 +1,123 @@
-broker:
-  image: 'prologic/mosquitto:latest'
-  ports:
-    - '1883:1883'
-database:
-  image: 'tutum/mongodb:latest'
-  environment:
-    - MONGODB_PASS={{** CHANGE ME **}}
+services:
+  broker:
+    image: eclipse-mosquitto:2.0.20
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "timeout", "1", "mosquitto_sub", "-h", "localhost", "-p", "1883", "-t", "topic", "-E", "-i", "probe"]
+      start_period: 10s
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - nightscout
 
-# Uncomment if you want to expose the MongoDB port directly
-# If you're using the API interface (highly recommended) then you can 
-# safely leave this commented out 
-#  ports:
-#    - '27017:27017'
+  database:
+    image: mongo:8.0.3
+    restart: unless-stopped
+    environment:
+      - MONGO_INITDB_ROOT_USERNAME=${MONGO_INITDB_ROOT_USERNAME}
+      - MONGO_INITDB_ROOT_PASSWORD=${MONGO_INITDB_ROOT_PASSWORD}
+      - MONGO_INITDB_DATABASE=${MONGO_INITDB_DATABASE}
+    volumes:
+      - ${MONGO_DATA_DIR}:/data/db
+    healthcheck:
+      test: echo 'db.runCommand("ping").ok' | mongosh localhost:27017/test --quiet
+      start_period: 10s
+      interval: 30s
+      timeout: 10s
+      retries: 5
+    networks:
+      - nightscout
 
-nightscout:
-  image: 'nightscout/cgm-remote-monitor-development:latest'
-  environment:
-    - API_SECRET={{** CHANGE ME **}}
-    - 'MONGO_CONNECTION=mongodb://admin:{{** CHANGE ME **}}@database/admin'
-    - 'MQTT_MONITOR=mqtt://{{** CHANGE ME **}}@broker'
-    - PORT=1337
-  links:
-    - broker
-    - database
-  ports:
-    - '1337:1337'
+  nightscout:
+    image: nightscout/cgm-remote-monitor:15.0.2
+    restart: unless-stopped
+    environment:
+      - API_SECRET=${NIGHTSCOUT_API_SECRET}
+      - MONGO_CONNECTION=mongodb://${MONGO_INITDB_ROOT_USERNAME}:${MONGO_INITDB_ROOT_PASSWORD}@database/admin
+      - MQTT_MONITOR=mqtt://${MONGO_INITDB_ROOT_PASSWORD}@broker
+      - PORT=${NIGHTSCOUT_PORT}
+      - INSECURE_USE_HTTP=true # We are using a SSL proxy for HTTPS
+      - AUTH_DEFAULT_ROLES=denied
+      - ENABLE=careportal basal Iob Cob Bwp Ar2 boluscalc cage sage iage pump cors openaps
+      - TIME_FORMAT=24
+    ports:
+      - "${NIGHTSCOUT_PORT}:${NIGHTSCOUT_PORT}"
+    depends_on:
+      database:
+        condition: service_healthy
+      broker:
+        condition: service_healthy
+    labels:
+      traefik.enable: "true"
+      # traefik.http.routers.nightscout.service: "nightscout"
+      traefik.http.routers.nightscout.rule: "Host(`${NIGHTSCOUT_DOMAIN}`)"
+      traefik.http.routers.nightscout.entrypoints: "websecure"
+      traefik.http.routers.nightscout.tls.certresolver: "myresolver"
+      traefik.http.services.nightscout.loadbalancer.server.port: "${NIGHTSCOUT_PORT}"
+    networks:
+      - nightscout
+
+  loadbalancer:
+    image: traefik:v3.2.1
+    restart: unless-stopped
+    command:
+      - "--api.insecure=true"
+      - "--providers.docker=true"
+      - "--providers.docker.exposedbydefault=false"
+      - "--providers.docker.network=nightscout"
+      - "--entrypoints.web.address=:80"
+      - "--entrypoints.websecure.address=:443"
+      - "--entrypoints.websecure.http.tls=true"
+      - "--entrypoints.websecure.http.tls.certresolver=myresolver"
+      - "--certificatesresolvers.myresolver.acme.email=${TRAEFIK_CERT_EMAIL}"
+      - "--certificatesresolvers.myresolver.acme.storage=/letsencrypt/acme.json"
+      - "--certificatesresolvers.myresolver.acme.httpchallenge=true"
+      - "--certificatesresolvers.myresolver.acme.httpchallenge.entrypoint=web"
+      - "--certificatesresolvers.myresolver.acme.caserver=https://acme-staging-v02.api.letsencrypt.org/directory"
+      - "--entrypoints.web.http.redirections.entrypoint.to=websecure"
+      - "--entrypoints.web.http.redirections.entrypoint.scheme=https"
+      - "--entrypoints.web.http.redirections.entrypoint.permanent=true"
+    ports:
+      - "80:80"
+      - "8080:8080"
+      - "443:443"
+    healthcheck:
+      test: ["CMD", "traefik", "healthcheck"]
+      interval: 5s
+      timeout: 3s
+      retries: 3
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ${TRAEFIK_LETSENCRYPT_DIR}:/letsencrypt
+    networks:
+      - nightscout
+
+  database-backup:
+    image: tiredofit/db-backup:latest
+    volumes:
+      - ${MONGO_BACKUPS_DIR}:/backup
+    environment:
+      - TIMEZONE=${MONGO_BACKUP_TIMEZONE}
+      - CONTAINER_ENABLE_MONITORING=FALSE
+      - BACKUP_JOB_CONCURRENCY=1     # Only run one job at a time
+      - DEFAULT_BACKUP_INTERVAL=1440   # Backup every 1440 minutes
+      - DEFAULT_BACKUP_BEGIN=0000      # Start backing up at midnight
+      - DEFAULT_CLEANUP_TIME=8640    # Cleanup backups after a week
+      - DEFAULT_COMPRESSION=GZ       # Compress with GZIP
+      - DEFAULT_CHECKSUM=SHA1        # Create a SHA1 checksum
+      - DB01_TYPE=mongodb
+      - DB01_HOST=database
+      - DB01_NAME=${MONGO_INITDB_DATABASE}
+      - DB01_USER=${MONGO_INITDB_ROOT_USERNAME}
+      - DB01_PASS=${MONGO_INITDB_ROOT_PASSWORD}
+    restart: unless-stopped
+    depends_on:
+      database:
+        condition: service_healthy
+    networks:
+      - nightscout
+
+networks:
+  nightscout:
+    driver: bridge
