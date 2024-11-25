@@ -14,12 +14,17 @@ services:
   database:
     image: mongo:8.0.3
     restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
     environment:
       - MONGO_INITDB_ROOT_USERNAME=${MONGO_INITDB_ROOT_USERNAME}
       - MONGO_INITDB_ROOT_PASSWORD=${MONGO_INITDB_ROOT_PASSWORD}
       - MONGO_INITDB_DATABASE=${MONGO_INITDB_DATABASE}
+      - MONGO_INITDB_USERNAME=${MONGO_INITDB_USERNAME}
+      - MONGO_INITDB_PASSWORD=${MONGO_INITDB_PASSWORD}
     volumes:
       - ${MONGO_DATA_DIR}:/data/db
+      - ./config/mongo-init.js:/docker-entrypoint-initdb.d/mongo-init.js:ro
     healthcheck:
       test: echo 'db.runCommand("ping").ok' | mongosh localhost:27017/test --quiet
       start_period: 10s
@@ -34,7 +39,7 @@ services:
     restart: unless-stopped
     environment:
       - API_SECRET=${NIGHTSCOUT_API_SECRET}
-      - MONGO_CONNECTION=mongodb://${MONGO_INITDB_ROOT_USERNAME}:${MONGO_INITDB_ROOT_PASSWORD}@database/admin
+      - MONGO_CONNECTION=mongodb://${MONGO_INITDB_USERNAME}:${MONGO_INITDB_PASSWORD}@database/${MONGO_INITDB_DATABASE}
       - MQTT_MONITOR=mqtt://${MONGO_INITDB_ROOT_PASSWORD}@broker
       - PORT=${NIGHTSCOUT_PORT}
       - INSECURE_USE_HTTP=true # We are using a SSL proxy for HTTPS
@@ -88,7 +93,7 @@ services:
       timeout: 3s
       retries: 3
     volumes:
-      - /var/run/docker.sock:/var/run/docker.sock
+      - ${TRAEFIK_DOCKER_SOCK}:/var/run/docker.sock
       - ${TRAEFIK_LETSENCRYPT_DIR}:/letsencrypt
     networks:
       - nightscout
